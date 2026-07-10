@@ -1,26 +1,37 @@
-# main.py
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import APIKeyHeader
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
 import os
 
-app = FastAPI(title="PC Automation Control Center")
+app = FastAPI(title="Jarvis Core Backend")
 
-# Simple API Key Authentication
-API_KEY = os.environ.get("AUTH_SECRET_KEY", "your-super-secure-shared-key")
+# --- CORS CONFIGURATION ---
+# Allows your Cloudflare frontend to talk to this Render backend securely
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- AUTHENTICATION ---
+# Pulls from Render Environment Variables, falls back to your hardcoded token
+API_KEY = os.environ.get("AUTH_SECRET_KEY", "yashansh-pc-auto-agent-8f72c9a1")
 api_key_header = APIKeyHeader(name="X-Auth-Token")
 
 async def verify_auth(token: str = Depends(api_key_header)):
     if token != API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing Auth Token",
+            detail="Unauthorized Access. Invalid Token.",
         )
     return token
 
-# Global in-memory state to hold the current command and execution status
-current_command = {"command": None, "status": "idle"}
+# --- SYSTEM STATE ---
+# Holds the single command in memory until the local node pulls it
+current_command = {"target": None, "status": "idle"}
 
 class VoicePayload(BaseModel):
     text: str
@@ -28,43 +39,42 @@ class VoicePayload(BaseModel):
 class StatusUpdate(BaseModel):
     status: str
 
+# --- API ROUTES ---
+
+@app.get("/")
+async def root_status():
+    """Front door routing - fixes the 'Not Found' error."""
+    return {"system": "Jarvis Render Node Online", "status": "operational"}
+
 @app.post("/api/command", dependencies=[Depends(verify_auth)])
 async def receive_voice_command(payload: VoicePayload):
-    raw_text = payload.text.lower()
-    
-    # AI Parsing Mockup: Translate natural language into structured JSON steps
-    # In production, replace this block with your AI API call (Gemini/OpenAI)
-    # prompt: "Convert this command into a JSON containing 'action' and 'target': {raw_text}"
-    structured_action = {"action": "unknown", "target": ""}
-    
-    if "chrome" in raw_text or "browser" in raw_text:
-        structured_action = {"action": "open", "target": "chrome"}
-    elif "notepad" in raw_text:
-        structured_action = {"action": "open", "target": "notepad"}
-    elif "volume up" in raw_text:
-        structured_action = {"action": "volume", "target": "up"}
-        
-    current_command["command"] = structured_action
+    """Frontend sends the raw voice text here."""
+    # We pass the raw text directly into the queue. 
+    # The local PC agent will handle the AI processing.
+    current_command["target"] = payload.text
     current_command["status"] = "pending"
     
-    return {"message": "Command queued successfully", "parsed": structured_action}
+    return {"message": "Command queued successfully", "raw_text": payload.text}
 
 @app.get("/api/agent/poll", dependencies=[Depends(verify_auth)])
 async def agent_poll():
-    """Local EXE hits this endpoint to see if there is work to do."""
+    """Local PC agent constantly hits this to check for work."""
     if current_command["status"] == "pending":
-        return {"has_command": True, "data": current_command["command"]}
+        return {"has_command": True, "data": current_command}
     return {"has_command": False}
 
 @app.post("/api/agent/status", dependencies=[Depends(verify_auth)])
 async def update_agent_status(payload: StatusUpdate):
-    """Local EXE reports back when done."""
+    """Local PC agent reports back when it starts working and when it finishes."""
     current_command["status"] = payload.status
-    if payload.status == "done":
-        current_command["command"] = None
+    
+    # Clear the queue once the task is complete or if it crashes locally
+    if payload.status in ["done", "failed"]:
+        current_command["target"] = None
+        
     return {"status": "acknowledged"}
 
 @app.get("/api/status")
 async def get_system_status():
-    """Frontend polls this to show current execution state."""
+    """Frontend polls this to update the UI (Running, Done, Failed)."""
     return current_command
